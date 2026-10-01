@@ -16,6 +16,7 @@ import { useAuth } from '@/context/AuthContext';
 import { ehrRepository } from '@/lib/storage/ehrRepository';
 import { executeAbacDecryption } from '@/lib/crypto/pqcCryptoService';
 import { EhrRecord, EmergencyBreakGlassEvent, FhirEhrPayload } from '@/types/ehr';
+import { broadcastPortalEmergency } from '@/lib/audio/emergencyBroadcast';
 
 function BreakGlassContent() {
   const searchParams = useSearchParams();
@@ -33,6 +34,7 @@ function BreakGlassContent() {
   const [generatedToken, setGeneratedToken] = useState<string | null>(null);
   const [unlockedPayload, setUnlockedPayload] = useState<FhirEhrPayload | null>(null);
   const [recentEvents, setRecentEvents] = useState<EmergencyBreakGlassEvent[]>([]);
+  const [alertSent, setAlertSent] = useState<{ emails: string[]; provider: string } | null>(null);
 
   useEffect(() => {
     const init = async () => {
@@ -63,7 +65,7 @@ function BreakGlassContent() {
     setIsExecuting(true);
 
     try {
-      // 1. Record Emergency Event and broadcast immutable high-severity log
+      // 1. Record Emergency Event
       const event = await ehrRepository.createBreakGlassEvent({
         recordId: selectedRecord.id,
         recordTitle: selectedRecord.recordTitle,
@@ -77,7 +79,49 @@ function BreakGlassContent() {
 
       setGeneratedToken(event.token);
 
-      // 2. Perform Emergency Cryptographic Bypass Decryption
+      // 2. Broadcast Real-Time In-Portal Emergency Siren Alert to all open windows/tabs & dept staff
+      broadcastPortalEmergency({
+        id: event.id,
+        targetDepartment: selectedRecord.department,
+        recordTitle: selectedRecord.recordTitle,
+        patientId: selectedRecord.patientId,
+        actorName: currentUser.fullName,
+        actorRole: currentUser.role,
+        severity,
+        justification,
+        token: event.token,
+        timestamp: Date.now(),
+      });
+
+      // 3. Notify backend alert service (registers in-portal emergency event)
+      try {
+        const alertRes = await fetch('/api/emergency/alert', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            actorName: currentUser.fullName,
+            actorRole: currentUser.role,
+            actorDepartment: currentUser.department || selectedRecord.department || 'Cardiology',
+            recordDepartment: selectedRecord.department,
+            justification,
+            severity,
+            recordTitle: selectedRecord.recordTitle,
+            patientId: selectedRecord.patientId,
+            token: event.token,
+          }),
+        });
+        const alertData = await alertRes.json();
+        if (alertData.success) {
+          setAlertSent({
+            emails: [selectedRecord.department + ' Clinical Staff (In-Portal Siren Active)'],
+            provider: 'In-Portal Siren & HUD Broadcast',
+          });
+        }
+      } catch (alertErr) {
+        console.warn('Alert dispatch failed:', alertErr);
+      }
+
+      // 3. Perform Emergency Cryptographic Bypass Decryption
       const result = await executeAbacDecryption(selectedRecord, currentUser, true);
 
       if (result.success && result.decryptedPayload) {
@@ -144,12 +188,30 @@ function BreakGlassContent() {
                 onClick={() => {
                   setOverrideSuccess(false);
                   setUnlockedPayload(null);
+                  setAlertSent(null);
                 }}
                 className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs text-slate-300 hover:text-white"
               >
                 Close Override View
               </button>
             </div>
+
+            {/* ALERT SENT CONFIRMATION */}
+            {alertSent && (
+              <div className="rounded-xl border border-amber-700/60 bg-amber-950/30 p-4 space-y-2">
+                <div className="flex items-center space-x-2 text-xs font-bold text-amber-200">
+                  <span className="text-base">📧</span>
+                  <span>Emergency Alert Dispatched — {alertSent.emails.length} recipient(s) notified via {alertSent.provider}</span>
+                </div>
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  {alertSent.emails.map((email) => (
+                    <span key={email} className="rounded-full bg-slate-900 border border-amber-700/40 px-2 py-0.5 text-[10px] font-mono text-amber-300">
+                      {email}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* CRITICAL ALLERGIES ALERT */}
             <div className="rounded-xl border border-rose-800/80 bg-rose-950/40 p-4 space-y-2">

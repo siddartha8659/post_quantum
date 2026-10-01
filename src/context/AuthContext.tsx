@@ -1,15 +1,19 @@
 'use client';
 
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { UserProfile } from '@/types/ehr';
+import { UserProfile, getCanonicalRole } from '@/types/ehr';
 import { ehrRepository } from '@/lib/storage/ehrRepository';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/supabaseClient';
+import { SEED_PROFILES } from '@/lib/data/seedData';
 
 interface AuthContextType {
   currentUser: UserProfile | null;
   profiles: UserProfile[];
   isLoading: boolean;
-  login: (email: string, password?: string) => Promise<boolean>;
+  staffOtpVerified: boolean;
+  authenticateCredentials: (email: string, password?: string) => Promise<{ success: boolean; profile?: UserProfile; isPatient: boolean; error?: string }>;
+  completeStaffOtpLogin: (profile: UserProfile, token: string) => void;
+  loginAsPatient: (profile: UserProfile) => void;
   logout: () => void;
   switchUser: (userId: string) => Promise<void>;
   toggleAttributeRevocation: (attribute: string) => Promise<void>;
@@ -20,11 +24,13 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 const CURRENT_USER_KEY = 'pq_abac_current_user_id';
+const PQ_TOKEN_KEY = 'pq_abac_session_token';
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [profiles, setProfiles] = useState<UserProfile[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [staffOtpVerified, setStaffOtpVerified] = useState<boolean>(false);
 
   const loadInitialData = async () => {
     setIsLoading(true);
@@ -33,18 +39,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const allProfiles = await ehrRepository.getProfiles();
       setProfiles(allProfiles);
 
+      // Restore session only if a user previously logged in via OTP (explicit login)
       const savedUserId = typeof window !== 'undefined' ? localStorage.getItem(CURRENT_USER_KEY) : null;
-      const matched = allProfiles.find((p) => p.id === savedUserId);
-      if (matched) {
-        setCurrentUser(matched);
-      } else if (allProfiles.length > 0) {
-        // Default to Dr. Sarah Rao (Tier-3 Oncologist)
-        const defaultUser = allProfiles.find((p) => p.role === 'Oncologist') || allProfiles[0];
-        setCurrentUser(defaultUser);
-        if (typeof window !== 'undefined') {
-          localStorage.setItem(CURRENT_USER_KEY, defaultUser.id);
+      const sessionToken = typeof window !== 'undefined' ? localStorage.getItem(PQ_TOKEN_KEY) : null;
+
+      if (savedUserId && sessionToken) {
+        // Only restore if there's a valid OTP session token too
+        const matched = allProfiles.find((p) => p.id === savedUserId);
+        if (matched) {
+          setCurrentUser(matched);
+          setStaffOtpVerified(true);
+        }
+      } else if (savedUserId && !sessionToken) {
+        // Patient sessions don't have a token — restore patients only
+        const matched = allProfiles.find((p) => p.id === savedUserId);
+        if (matched && (matched.role || '').toLowerCase() === 'patient') {
+          setCurrentUser(matched);
+          setStaffOtpVerified(true);
+        } else {
+          // Staff without token = force re-login
+          localStorage.removeItem(CURRENT_USER_KEY);
         }
       }
+      // No saved session → start unauthenticated (show home/login page)
     } catch (err) {
       console.error('Failed to load profiles:', err);
     } finally {
@@ -55,14 +72,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     loadInitialData();
 
-    // Listen for live Supabase auth state if configured
     if (isSupabaseConfigured && supabase) {
       const {
         data: { subscription },
       } = supabase.auth.onAuthStateChange(async (event, session) => {
         if (session?.user) {
           const profile = await ehrRepository.getProfileById(session.user.id);
-          if (profile) setCurrentUser(profile);
+          if (profile) {
+            setCurrentUser(profile);
+            setStaffOtpVerified(true);
+          }
         }
       });
       return () => subscription.unsubscribe();
@@ -78,43 +97,72 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const login = async (email: string, password?: string): Promise<boolean> => {
+  /**
+   * Step 1: Credential Authentication
+   * Validates email/password against Supabase Auth or seeded directory
+   */
+  const authenticateCredentials = async (
+    email: string,
+    password?: string
+  ): Promise<{ success: boolean; profile?: UserProfile; isPatient: boolean; error?: string }> => {
     setIsLoading(true);
     try {
+      // 1. Try Supabase Auth if configured
       if (isSupabaseConfigured && supabase && password) {
         const { data, error } = await supabase.auth.signInWithPassword({
           email,
           password,
         });
         if (error) {
-          console.warn('Supabase auth sign-in error:', error.message);
+          console.warn('Supabase auth error:', error.message);
         } else if (data.user) {
           const profile = await ehrRepository.getProfileById(data.user.id);
           if (profile) {
-            setCurrentUser(profile);
-            localStorage.setItem(CURRENT_USER_KEY, profile.id);
+            const isPatient = getCanonicalRole(profile.role) === 'patient';
             setIsLoading(false);
-            return true;
+            return { success: true, profile, isPatient };
           }
         }
       }
 
-      // Quick lookup for preset demo profiles
-      const matched = profiles.find((p) => p.email.toLowerCase() === email.toLowerCase());
+      // 2. Directory lookup for pre-configured demo accounts
+      const all = await ehrRepository.getProfiles();
+      const matched = all.find((p) => p.email.toLowerCase() === email.toLowerCase())
+        || SEED_PROFILES.find((p) => p.email.toLowerCase() === email.toLowerCase());
       if (matched) {
-        setCurrentUser(matched);
-        if (typeof window !== 'undefined') {
-          localStorage.setItem(CURRENT_USER_KEY, matched.id);
-        }
+        const isPatient = getCanonicalRole(matched.role) === 'patient';
         setIsLoading(false);
-        return true;
+        return { success: true, profile: matched, isPatient };
       }
 
       setIsLoading(false);
-      return false;
-    } catch {
+      return { success: false, isPatient: false, error: 'Unregistered email or invalid clinical credentials.' };
+    } catch (err: any) {
       setIsLoading(false);
-      return false;
+      return { success: false, isPatient: false, error: err.message || 'Authentication failed' };
+    }
+  };
+
+  /**
+   * Step 2: Complete Staff Login after verified 6-digit Email OTP challenge
+   */
+  const completeStaffOtpLogin = (profile: UserProfile, token: string) => {
+    setCurrentUser(profile);
+    setStaffOtpVerified(true);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(CURRENT_USER_KEY, profile.id);
+      localStorage.setItem(PQ_TOKEN_KEY, token);
+    }
+  };
+
+  /**
+   * Patient Direct Login: Patients bypass staff OTP challenge
+   */
+  const loginAsPatient = (profile: UserProfile) => {
+    setCurrentUser(profile);
+    setStaffOtpVerified(true);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(CURRENT_USER_KEY, profile.id);
     }
   };
 
@@ -124,14 +172,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     if (typeof window !== 'undefined') {
       localStorage.removeItem(CURRENT_USER_KEY);
+      localStorage.removeItem(PQ_TOKEN_KEY);
     }
     setCurrentUser(null);
+    setStaffOtpVerified(false);
   };
 
   const switchUser = async (userId: string) => {
     const target = profiles.find((p) => p.id === userId);
     if (target) {
       setCurrentUser(target);
+      setStaffOtpVerified(true);
       if (typeof window !== 'undefined') {
         localStorage.setItem(CURRENT_USER_KEY, target.id);
       }
@@ -168,6 +219,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       metadata: {
         affectedAttribute: attribute,
         action: isAlreadyRevoked ? 'RESTORED' : 'REVOKED',
+        actor_department: currentUser.department,
       },
     });
 
@@ -180,7 +232,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         currentUser,
         profiles,
         isLoading,
-        login,
+        staffOtpVerified,
+        authenticateCredentials,
+        completeStaffOtpLogin,
+        loginAsPatient,
         logout,
         switchUser,
         toggleAttributeRevocation,

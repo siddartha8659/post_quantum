@@ -87,7 +87,7 @@ SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
 
 ### Step 3: Run Database Migration
-Open your Supabase Project dashboard, go to the **SQL Editor**, and paste the full contents of [`schema.sql`](file:///c:/Users/Tejaswini/Desktop/post_quantum/schema.sql).
+Open your Supabase Project dashboard, go to the **SQL Editor**, and paste the full contents of `schema.sql`.
 
 This script automatically provisions:
 1. `profiles`: Clinician demographic attributes, department, clearance level (Tier 1–3), and revocation state.

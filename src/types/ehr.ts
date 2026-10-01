@@ -5,6 +5,8 @@
 
 export type ClearanceLevel = 1 | 2 | 3;
 
+export type CanonicalRole = 'patient' | 'doctor' | 'nurse' | 'researcher' | 'er_doctor' | 'admin';
+
 export type UserRole =
   | 'Oncologist'
   | 'Triage_Nurse'
@@ -12,7 +14,23 @@ export type UserRole =
   | 'Epidemiologist'
   | 'Cardiologist'
   | 'Administrator'
-  | 'Patient';
+  | 'Patient'
+  | 'patient'
+  | 'doctor'
+  | 'nurse'
+  | 'researcher'
+  | 'er_doctor'
+  | 'admin';
+
+export function getCanonicalRole(role: string): CanonicalRole {
+  const lower = (role || '').toLowerCase();
+  if (lower === 'patient') return 'patient';
+  if (lower === 'nurse' || lower.includes('triage') || lower.includes('nurse')) return 'nurse';
+  if (lower === 'er_doctor' || lower.includes('er_') || lower.includes('emergency')) return 'er_doctor';
+  if (lower === 'researcher' || lower.includes('epidemiologist') || lower.includes('research')) return 'researcher';
+  if (lower === 'admin' || lower.includes('administrator')) return 'admin';
+  return 'doctor';
+}
 
 export type Department =
   | 'Oncology'
@@ -21,6 +39,30 @@ export type Department =
   | 'Cardiology'
   | 'General'
   | 'Administration';
+
+export interface Patient {
+  id: string;
+  userId?: string; // Linked if patient has a portal login
+  fullName: string;
+  dateOfBirth: string;
+  gender: string;
+  contactEmail?: string;
+  bloodGroup?: string;
+  assignedDepartment: string;
+  primaryDoctorId?: string;
+  researchConsent: boolean;
+  mrn?: string;
+  createdAt?: string;
+}
+
+export interface DoctorPatientAssignment {
+  id: string;
+  doctorId: string;
+  patientId: string;
+  assignmentType: 'PRIMARY' | 'CONSULTING' | 'SPECIALIST';
+  isActive: boolean;
+  assignedAt: string;
+}
 
 export interface UserProfile {
   id: string;
@@ -33,6 +75,8 @@ export interface UserProfile {
   isActive: boolean;
   revokedAttributes?: string[]; // e.g. ['clearanceLevel', 'department'] for live revocation tests
   avatarUrl?: string;
+  patientId?: string; // Bound patient record if role is patient
+  assignedWard?: string; // e.g. "Cardiology", "Emergency Ward"
 }
 
 export type AbacOperator = '==' | '!=' | '>=' | '<=' | '>' | '<' | 'IN' | 'CONTAINS';
@@ -105,12 +149,17 @@ export interface FhirEhrPayload {
   lastUpdated: string;
 }
 
+export type SensitivityLevel = 'STANDARD' | 'SENSITIVE' | 'HIGHLY_CONFIDENTIAL';
+
 export interface EhrRecord {
   id: string;
   patientId: string;
+  patientRefId?: string; // Foreign key referencing public.patients(id)
   recordTitle: string;
   department: Department;
   classificationLevel: ClearanceLevel;
+  sensitivityLevel?: SensitivityLevel;
+  requireStepUpOtp?: boolean;
   encryptedPayload: string; // Base64 of AES-256-GCM ciphertext
   payloadIv: string; // Base64 12-byte IV
   authTag: string; // Base64 16-byte Auth Tag
@@ -140,9 +189,10 @@ export interface AbacEvaluationTrace {
 
 export interface DecryptionResult {
   success: boolean;
+  error?: string;
   record?: EhrRecord;
   decryptedPayload?: FhirEhrPayload;
-  evaluationTrace: AbacEvaluationTrace;
+  evaluationTrace?: AbacEvaluationTrace;
   decryptionTimeMs: number;
   kemAlgorithm: string;
   kemCiphertextSize: number;
@@ -159,7 +209,10 @@ export interface AuditLogEntry {
     | 'POLICY_DENIAL'
     | 'BREAK_GLASS_ACCESS'
     | 'ATTRIBUTE_REVOKED'
-    | 'KEY_ROTATION';
+    | 'KEY_ROTATION'
+    | 'STEP_UP_OTP_VERIFIED'
+    | 'CONSENT_UPDATED'
+    | 'CROSS_DEPT_QUERY';
   userId: string;
   userName: string;
   userRole: string;

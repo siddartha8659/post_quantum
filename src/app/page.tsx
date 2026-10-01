@@ -1,7 +1,8 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import {
   Lock,
   ArrowRight,
@@ -11,8 +12,34 @@ import {
   KeyRound,
 } from 'lucide-react';
 import { Navigation } from '@/components/Navigation';
+import { useAuth } from '@/context/AuthContext';
 
 export default function HomePage() {
+  const router = useRouter();
+  const { currentUser } = useAuth();
+
+  // Redirect logged-in users directly to their portal — they shouldn't linger on the home page
+  useEffect(() => {
+    if (!currentUser) return;
+    const role = (currentUser.role || '').toLowerCase();
+    if (role === 'patient') {
+      router.replace('/portal/patient');
+    } else {
+      router.replace('/dashboard');
+    }
+  }, [currentUser, router]);
+
+  // While checking auth / redirecting, show nothing (avoids flash of home page)
+  if (currentUser) {
+    return (
+      <div className="min-h-screen quantum-grid-bg flex items-center justify-center">
+        <div className="flex flex-col items-center space-y-4">
+          <div className="h-10 w-10 rounded-full border-2 border-quantum-400 border-t-transparent animate-spin" />
+          <p className="text-xs font-mono text-slate-400">Redirecting to your portal…</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen quantum-grid-bg flex flex-col">
@@ -23,7 +50,7 @@ export default function HomePage() {
         <section className="text-center space-y-6 pt-8 pb-4 max-w-4xl mx-auto">
           <div className="inline-flex items-center space-x-2 rounded-full border border-quantum-500/30 bg-quantum-950/80 px-4 py-1.5 text-xs font-mono font-medium text-quantum-300 backdrop-blur-md">
             <span className="flex h-2 w-2 rounded-full bg-quantum-400 animate-pulse"></span>
-            <span>FIPS 203 ML-KEM-768 & FIPS 204 ML-DSA-65 Standards Active</span>
+            <span>FIPS 203 ML-KEM-768 &amp; FIPS 204 ML-DSA-65 Standards Active</span>
           </div>
 
           <h1 className="text-3xl sm:text-5xl lg:text-6xl font-black text-white tracking-tight leading-tight">
@@ -41,27 +68,11 @@ export default function HomePage() {
 
           <div className="flex flex-wrap items-center justify-center gap-4 pt-4">
             <Link
-              href="/dashboard"
+              href="/login"
               className="flex items-center space-x-2 rounded-2xl bg-gradient-to-r from-quantum-600 to-cyan-500 px-6 py-3.5 text-xs sm:text-sm font-bold text-white shadow-xl shadow-quantum-900/40 hover:from-quantum-500 hover:to-cyan-400 hover:scale-105 transition"
             >
-              <span>Launch Clinician EHR Explorer</span>
+              <span>Clinician &amp; Patient Login (MFA OTP)</span>
               <ArrowRight className="h-4 w-4" />
-            </Link>
-
-            <Link
-              href="/records/new"
-              className="flex items-center space-x-2 rounded-2xl border border-slate-700 bg-slate-900/90 px-6 py-3.5 text-xs sm:text-sm font-bold text-slate-200 hover:bg-slate-800 hover:text-white transition"
-            >
-              <Lock className="h-4 w-4 text-quantum-400" />
-              <span>Encrypt New EHR Payload</span>
-            </Link>
-
-            <Link
-              href="/break-glass"
-              className="flex items-center space-x-2 rounded-2xl border border-rose-800/80 bg-rose-950/40 px-6 py-3.5 text-xs sm:text-sm font-bold text-rose-300 hover:bg-rose-900/60 transition"
-            >
-              <AlertTriangle className="h-4 w-4 text-rose-400" />
-              <span>Break-Glass Console</span>
             </Link>
           </div>
         </section>
@@ -69,7 +80,7 @@ export default function HomePage() {
         {/* CORE ARCHITECTURE MODULE CARDS */}
         <section className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <Link
-            href="/dashboard"
+            href="/login"
             className="group rounded-3xl border border-slate-800 bg-slate-900/70 p-6 shadow-xl backdrop-blur-xl transition hover:border-quantum-600 hover:bg-slate-850 flex flex-col justify-between"
           >
             <div className="space-y-3">
@@ -77,7 +88,7 @@ export default function HomePage() {
                 <FileSpreadsheet className="h-6 w-6" />
               </div>
               <h2 className="text-base font-bold text-white group-hover:text-quantum-300 transition">
-                EHR Directory & Live Decryption Simulator
+                EHR Directory &amp; Live Decryption Simulator
               </h2>
               <p className="text-xs text-slate-400 leading-relaxed">
                 Browse encrypted patient records. Select any record to watch the ABAC engine evaluate
@@ -85,13 +96,13 @@ export default function HomePage() {
               </p>
             </div>
             <div className="mt-6 flex items-center space-x-1.5 text-xs font-semibold text-quantum-400">
-              <span>Explore Directory</span>
+              <span>Login to Explore</span>
               <ArrowRight className="h-3.5 w-3.5 group-hover:translate-x-1 transition" />
             </div>
           </Link>
 
           <Link
-            href="/break-glass"
+            href="/login"
             className="group rounded-3xl border border-slate-800 bg-slate-900/70 p-6 shadow-xl backdrop-blur-xl transition hover:border-rose-600 hover:bg-slate-850 flex flex-col justify-between"
           >
             <div className="space-y-3">
@@ -107,13 +118,13 @@ export default function HomePage() {
               </p>
             </div>
             <div className="mt-6 flex items-center space-x-1.5 text-xs font-semibold text-rose-400">
-              <span>Emergency Console</span>
+              <span>Login to Access</span>
               <ArrowRight className="h-3.5 w-3.5 group-hover:translate-x-1 transition" />
             </div>
           </Link>
 
           <Link
-            href="/keys"
+            href="/login"
             className="group rounded-3xl border border-slate-800 bg-slate-900/70 p-6 shadow-xl backdrop-blur-xl transition hover:border-cyan-600 hover:bg-slate-850 flex flex-col justify-between"
           >
             <div className="space-y-3">
@@ -121,7 +132,7 @@ export default function HomePage() {
                 <KeyRound className="h-6 w-6" />
               </div>
               <h2 className="text-base font-bold text-white group-hover:text-cyan-300 transition">
-                Key Governance & Telemetry Center
+                Key Governance &amp; Telemetry Center
               </h2>
               <p className="text-xs text-slate-400 leading-relaxed">
                 Inspect Multi-Authority root keys, run browser microbenchmarks for ML-KEM-768, view PQC vs
@@ -129,7 +140,7 @@ export default function HomePage() {
               </p>
             </div>
             <div className="mt-6 flex items-center space-x-1.5 text-xs font-semibold text-cyan-400">
-              <span>View Key Governance</span>
+              <span>Login to View</span>
               <ArrowRight className="h-3.5 w-3.5 group-hover:translate-x-1 transition" />
             </div>
           </Link>
@@ -140,14 +151,14 @@ export default function HomePage() {
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-4">
             <div>
               <h2 className="text-lg font-bold text-white">
-                Cryptographic Primitives & Regulatory Compliance
+                Cryptographic Primitives &amp; Regulatory Compliance
               </h2>
               <p className="text-xs text-slate-400">
                 Detailed mapping of clinical data protection layers against NIST and HIPAA specifications.
               </p>
             </div>
             <Link
-              href="/audit"
+              href="/login"
               className="flex items-center space-x-1.5 text-xs font-bold text-quantum-400 hover:text-quantum-300"
             >
               <History className="h-4 w-4" />
@@ -198,6 +209,18 @@ export default function HomePage() {
           </div>
         </section>
       </main>
+
+      {/* Footer */}
+      <footer className="border-t border-slate-800/60 bg-slate-950/80 py-5 px-6 text-center space-y-2">
+        <p className="text-[11px] font-mono text-slate-500">
+          Apex Health Systems · FIPS PUB 203 / 204 · HIPAA Compliant ·{' '}
+          <span className="text-quantum-500">PQ-ABAC-EHR v2.4</span>
+        </p>
+        <div className="inline-flex items-center space-x-2 rounded-full border border-slate-800 bg-slate-900/80 px-4 py-1 text-xs text-slate-400 font-mono">
+          <span className="text-quantum-400 font-semibold">Project Representation:</span>
+          <span className="text-slate-200">Suresh · Yash · Riya · Aliya · Priya · Siddartha</span>
+        </div>
+      </footer>
     </div>
   );
 }

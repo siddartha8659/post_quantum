@@ -1,331 +1,433 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
   FileText,
-  Lock,
   Unlock,
   Search,
-  Filter,
   PlusCircle,
   AlertTriangle,
+  ShieldAlert,
+  Users,
+  CheckCircle2,
+  Building,
+  ShieldCheck,
+  Stethoscope,
+  ArrowRight,
+  LogOut,
 } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { ehrRepository } from '@/lib/storage/ehrRepository';
-import { EhrRecord, DecryptionResult } from '@/types/ehr';
-import { executeAbacDecryption } from '@/lib/crypto/pqcCryptoService';
+import {
+  EhrRecord,
+  DecryptionResult,
+  Patient,
+  getCanonicalRole,
+} from '@/types/ehr';
 import { DecryptionModal } from '@/components/DecryptionModal';
 import { Navigation } from '@/components/Navigation';
 
 export default function DashboardPage() {
-  const { currentUser } = useAuth();
-  const [records, setRecords] = useState<EhrRecord[]>([]);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedDept, setSelectedDept] = useState<string>('ALL');
-  const [selectedClassification, setSelectedClassification] = useState<string>('ALL');
+  const router = useRouter();
+  const { currentUser, logout } = useAuth();
 
-  // Modal & Decryption State
+  const [records, setRecords] = useState<EhrRecord[]>([]);
+  const [deptPatients, setDeptPatients] = useState<Patient[]>([]);
+  const [scopingNotice, setScopingNotice] = useState<string>('');
+  const [searchQuery, setSearchQuery] = useState('');
   const [selectedRecord, setSelectedRecord] = useState<EhrRecord | null>(null);
   const [decryptionResult, setDecryptionResult] = useState<DecryptionResult | null>(null);
   const [isDecrypting, setIsDecrypting] = useState(false);
-  const [modalOpen, setModalOpen] = useState(false);
+  const [denialAlert, setDenialAlert] = useState<string>('');
 
-  const loadRecords = async () => {
-    const list = await ehrRepository.getRecords();
-    setRecords(list);
-  };
+  const canonicalRole = currentUser ? getCanonicalRole(currentUser.role) : 'doctor';
+
+  // If patient logs into dashboard, redirect directly to sovereign patient portal
+  useEffect(() => {
+    if (currentUser && canonicalRole === 'patient') {
+      router.push('/portal/patient');
+    }
+  }, [currentUser, canonicalRole, router]);
+
+  const loadDepartmentData = useCallback(async () => {
+    if (!currentUser) return;
+
+    // 1. Fetch strictly department-scoped patients
+    const patients = await ehrRepository.getDepartmentScopedPatients(currentUser);
+    setDeptPatients(patients);
+
+    // 2. Fetch strictly department-scoped EHR records
+    const scoped = await ehrRepository.getScopedRecordsForUser(currentUser);
+    setRecords(scoped.records);
+    setScopingNotice(scoped.scopingNotice);
+  }, [currentUser]);
 
   useEffect(() => {
-    loadRecords();
-  }, []);
+    loadDepartmentData();
+  }, [loadDepartmentData]);
 
-  const handleInspectRecord = async (record: EhrRecord) => {
+  /**
+   * Decrypt Record Action: Calls backend /api/records/decrypt to enforce ABAC & ML-KEM
+   */
+  const handleDecryptRecord = async (record: EhrRecord) => {
     if (!currentUser) return;
+
     setSelectedRecord(record);
-    setModalOpen(true);
     setIsDecrypting(true);
-    setDecryptionResult(null);
+    setDenialAlert('');
 
-    // Simulate network & lattice decapsulation time
-    const result = await executeAbacDecryption(record, currentUser, false);
+    try {
+      const res = await fetch('/api/records/decrypt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          recordId: record.id,
+          user: currentUser,
+        }),
+      });
 
-    // Record access attempt into immutable audit log
-    await ehrRepository.addAuditLogEntry({
-      eventType: 'DECRYPTION_ATTEMPT',
-      userId: currentUser.id,
-      userName: currentUser.fullName,
-      userRole: currentUser.role,
-      recordId: record.id,
-      recordTitle: record.recordTitle,
-      policyEvaluated: record.abacPolicy,
-      outcome: result.success ? 'GRANTS' : 'DENIED',
-      reason: result.success
-        ? `ABAC Policy verified. AES-256 DEK decapsulated via ${record.kemAlgorithm} in ${result.decryptionTimeMs}ms.`
-        : `ABAC Policy Denied: ${result.evaluationTrace.denialReasons.join('; ')}`,
-      metadata: {
-        kemAlgorithm: record.kemAlgorithm,
-        evaluatorDept: currentUser.department,
-        evaluatorClearance: currentUser.clearanceLevel,
-        latencyMs: result.decryptionTimeMs,
-      },
-    });
+      const data = await res.json();
+      setIsDecrypting(false);
 
-    setIsDecrypting(false);
-    setDecryptionResult(result);
+      if (data.success) {
+        setDecryptionResult({
+          success: true,
+          record,
+          decryptedPayload: data.decryptedPayload,
+          evaluationTrace: data.evaluationTrace || {
+            passed: true,
+            combinator: 'AND',
+            steps: [],
+            denialReasons: [],
+          },
+          decryptionTimeMs: data.decryptionTimeMs,
+          kemAlgorithm: data.kemAlgorithm || 'ML-KEM-768',
+          kemCiphertextSize: data.kemCiphertextSize || 1088,
+          aesIvSize: data.aesIvSize || 12,
+          authTagVerified: data.authTagVerified ?? true,
+        });
+      } else {
+        setDecryptionResult({
+          success: false,
+          error: data.error || 'Access Denied: ABAC policy violation.',
+          record,
+          evaluationTrace: data.evaluationTrace || {
+            passed: false,
+            combinator: 'AND',
+            steps: [],
+            denialReasons: [data.error || 'Access denied'],
+          },
+          decryptionTimeMs: 0,
+          kemAlgorithm: 'ML-KEM-768',
+          kemCiphertextSize: 1088,
+          aesIvSize: 12,
+          authTagVerified: false,
+        });
+        setDenialAlert(data.error || 'Access Denied: ABAC policy violation.');
+      }
+    } catch (err: any) {
+      setIsDecrypting(false);
+      setDecryptionResult({
+        success: false,
+        error: err.message || 'Decryption service error',
+        record,
+        evaluationTrace: {
+          passed: false,
+          combinator: 'AND',
+          steps: [],
+          denialReasons: [err.message || 'Decryption service error'],
+        },
+        decryptionTimeMs: 0,
+        kemAlgorithm: 'ML-KEM-768',
+        kemCiphertextSize: 1088,
+        aesIvSize: 12,
+        authTagVerified: false,
+      });
+    }
   };
 
+  // Filter records by search query within department
   const filteredRecords = records.filter((r) => {
-    const matchesSearch =
-      r.recordTitle.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      r.patientId.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      r.department.toLowerCase().includes(searchQuery.toLowerCase());
-
-    const matchesDept = selectedDept === 'ALL' || r.department === selectedDept;
-    const matchesClearance =
-      selectedClassification === 'ALL' ||
-      r.classificationLevel === parseInt(selectedClassification, 10);
-
-    return matchesSearch && matchesDept && matchesClearance;
+    const query = searchQuery.toLowerCase();
+    return (
+      r.recordTitle.toLowerCase().includes(query) ||
+      r.patientId.toLowerCase().includes(query) ||
+      r.department.toLowerCase().includes(query)
+    );
   });
 
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen quantum-grid-bg flex items-center justify-center p-6 text-center">
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/90 p-8 max-w-md shadow-2xl backdrop-blur-xl">
+          <ShieldAlert className="h-12 w-12 text-rose-400 mx-auto mb-4" />
+          <h2 className="text-xl font-bold text-white mb-2">Unauthenticated Session</h2>
+          <p className="text-xs text-slate-400 mb-6">
+            Please log in with verified clinical staff credentials and complete the 2-step OTP challenge.
+          </p>
+          <Link
+            href="/login"
+            className="inline-flex items-center space-x-2 rounded-xl bg-quantum-600 px-5 py-2.5 text-xs font-bold text-white hover:bg-quantum-500 transition"
+          >
+            <span>Proceed to Login</span>
+            <ArrowRight className="h-4 w-4" />
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen quantum-grid-bg flex flex-col">
+    <div className="min-h-screen quantum-grid-bg text-slate-100 flex flex-col">
       <Navigation />
 
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
-        {/* Clinician Overview & Header */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-900/80 p-6 backdrop-blur-xl">
-          <div className="space-y-1">
-            <div className="flex items-center space-x-2">
-              <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight">
-                EHR Record Directory & ABAC Simulator
-              </h1>
-              <span className="rounded bg-quantum-950 px-2 py-0.5 text-xs font-mono font-bold text-quantum-300 border border-quantum-800">
-                FIPS 203 ML-KEM-768
-              </span>
-            </div>
-            <p className="text-xs text-slate-400">
-              Select any encrypted electronic health record below to initiate post-quantum decapsulation
-              and evaluate clinical attributes in real-time.
-            </p>
-          </div>
-
-          <div className="flex items-center space-x-3">
-            <Link
-              href="/records/new"
-              className="flex items-center space-x-2 rounded-xl bg-gradient-to-r from-quantum-600 to-cyan-500 px-4 py-2.5 text-xs font-bold text-white shadow-lg shadow-quantum-900/40 hover:from-quantum-500 hover:to-cyan-400 transition"
-            >
-              <PlusCircle className="h-4 w-4" />
-              <span>Encrypt New EHR</span>
-            </Link>
-
-            <Link
-              href="/break-glass"
-              className="flex items-center space-x-2 rounded-xl border border-rose-800/80 bg-rose-950/60 px-4 py-2.5 text-xs font-bold text-rose-300 hover:bg-rose-900/60 transition"
-            >
-              <AlertTriangle className="h-4 w-4 text-rose-400" />
-              <span>Break-Glass Override</span>
-            </Link>
-          </div>
-        </div>
-
-        {/* Telemetry Stats Bar */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-            <p className="text-xs text-slate-400">Protected Records</p>
-            <p className="text-2xl font-black text-white mt-1">{records.length}</p>
-            <p className="text-[11px] text-quantum-400 mt-1 font-mono">100% AES-GCM Enveloped</p>
-          </div>
-
-          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-            <p className="text-xs text-slate-400">Evaluating Clinician</p>
-            <p className="text-sm font-bold text-white mt-1 truncate">
-              {currentUser?.fullName || 'Not Authenticated'}
-            </p>
-            <p className="text-[11px] text-slate-400 mt-1">
-              {currentUser?.role} • {currentUser?.department}
-            </p>
-          </div>
-
-          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-            <p className="text-xs text-slate-400">Clearance Tier</p>
-            <div className="flex items-center space-x-2 mt-1">
-              <span
-                className={`text-2xl font-black ${
-                  currentUser?.clearanceLevel === 3
-                    ? 'text-purple-400'
-                    : currentUser?.clearanceLevel === 2
-                    ? 'text-blue-400'
-                    : 'text-slate-300'
-                }`}
-              >
-                Tier-{currentUser?.clearanceLevel}
-              </span>
-              {(currentUser?.revokedAttributes || []).includes('clearanceLevel') && (
-                <span className="rounded bg-rose-950 px-1.5 py-0.5 text-[9px] font-bold text-rose-300 border border-rose-800">
-                  REVOKED
+        {/* Clinician Identity & Department Security Header */}
+        <div className="rounded-3xl border border-slate-800 bg-gradient-to-r from-slate-900/90 via-slate-900/80 to-slate-950/90 p-6 sm:p-8 shadow-xl backdrop-blur-xl">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+            <div className="space-y-2">
+              <div className="flex items-center space-x-3">
+                <span className="flex h-3 w-3 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="text-xs font-mono font-semibold uppercase tracking-wider text-emerald-400">
+                  Post-Quantum Verified Session Active
                 </span>
-              )}
+              </div>
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight flex items-center gap-3">
+                <span>{currentUser.fullName}</span>
+                <span className="rounded-full bg-quantum-950 px-3 py-1 text-xs font-mono font-bold text-quantum-300 border border-quantum-800">
+                  [{currentUser.department}]
+                </span>
+              </h1>
+              <div className="flex flex-wrap items-center gap-3 text-xs text-slate-300">
+                <span className="flex items-center space-x-1">
+                  <Stethoscope className="h-3.5 w-3.5 text-slate-400" />
+                  <span className="font-semibold uppercase tracking-wide">{currentUser.role}</span>
+                </span>
+                <span>•</span>
+                <span className="flex items-center space-x-1">
+                  <ShieldCheck className="h-3.5 w-3.5 text-quantum-400" />
+                  <span className="font-semibold text-quantum-300">Clearance Tier-{currentUser.clearanceLevel}</span>
+                </span>
+                <span>•</span>
+                <span className="flex items-center space-x-1">
+                  <Building className="h-3.5 w-3.5 text-slate-400" />
+                  <span>{currentUser.hospitalId}</span>
+                </span>
+                <span>•</span>
+                <span className="font-mono text-slate-400">{currentUser.email}</span>
+              </div>
             </div>
-            <p className="text-[11px] text-slate-400 mt-1">Hospital: {currentUser?.hospitalId}</p>
+
+            {/* Sign Out & Return to Home Button */}
+            <div className="flex items-center">
+              <button
+                type="button"
+                onClick={() => {
+                  logout();
+                  router.push('/');
+                }}
+                className="flex items-center space-x-2.5 rounded-2xl border border-rose-800/80 bg-rose-950/40 px-5 py-3 text-xs font-bold text-rose-200 hover:bg-rose-900/60 hover:text-white transition shadow-lg shadow-rose-950/50"
+              >
+                <LogOut className="h-4 w-4 text-rose-400" />
+                <span>Sign Out & Return to Home</span>
+              </button>
+            </div>
           </div>
 
-          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-            <p className="text-xs text-slate-400">Lattice Parameter</p>
-            <p className="text-base font-mono font-bold text-quantum-300 mt-1">k=3, q=3329</p>
-            <p className="text-[11px] text-slate-400 mt-1 font-mono">ML-KEM-768 (1088B CT)</p>
+          {/* Scoping Enforcement Notice */}
+          <div className="mt-6 rounded-2xl border border-quantum-800/50 bg-quantum-950/30 p-4 flex items-start space-x-3 text-xs text-quantum-200">
+            <ShieldCheck className="h-5 w-5 text-quantum-400 flex-shrink-0 mt-0.5" />
+            <div>
+              <span className="font-bold text-white">Strict Departmental Isolation Boundary: </span>
+              <span>{scopingNotice}</span>
+            </div>
           </div>
         </div>
 
-        {/* Filter & Search Bar */}
-        <div className="flex flex-col sm:flex-row items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/60 p-3">
-          <div className="relative w-full sm:w-96">
-            <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-500" />
-            <input
-              type="text"
-              placeholder="Search records by title, patient ID, department..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full rounded-lg border border-slate-800 bg-slate-950 py-2 pl-9 pr-4 text-xs text-white placeholder-slate-500 focus:border-quantum-500 focus:outline-none"
-            />
+        {/* Global Security Denial Alert */}
+        {denialAlert && (
+          <div className="rounded-2xl border border-rose-800 bg-rose-950/50 p-4 flex items-center space-x-3 text-xs text-rose-200 animate-in fade-in">
+            <AlertTriangle className="h-5 w-5 text-rose-400 flex-shrink-0" />
+            <span>{denialAlert}</span>
+          </div>
+        )}
+
+        {/* Section 1: Patient Cohort Directory (Strictly Department-Scoped) */}
+        <div className="rounded-3xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl backdrop-blur-xl space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-bold text-white tracking-tight flex items-center space-x-2">
+                <Users className="h-5 w-5 text-quantum-400" />
+                <span>Admitted Patient Cohort: {currentUser.department} Department</span>
+              </h2>
+              <p className="text-xs text-slate-400">
+                Returned patient roster is strictly filtered by your assigned department. Cross-department browsing is prohibited.
+              </p>
+            </div>
+            <span className="rounded-full bg-slate-800 px-3 py-1 text-xs font-mono font-semibold text-slate-300">
+              {deptPatients.length} Admitted Patients
+            </span>
           </div>
 
-          <div className="flex items-center space-x-2 w-full sm:w-auto">
-            <div className="flex items-center space-x-1.5 text-xs text-slate-400">
-              <Filter className="h-3.5 w-3.5 text-slate-500" />
-              <span>Dept:</span>
-            </div>
-            <select
-              value={selectedDept}
-              onChange={(e) => setSelectedDept(e.target.value)}
-              className="rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-1.5 text-xs text-white focus:outline-none"
-            >
-              <option value="ALL">All Departments</option>
-              <option value="Oncology">Oncology</option>
-              <option value="Emergency">Emergency</option>
-              <option value="Cardiology">Cardiology</option>
-              <option value="Research">Research</option>
-            </select>
-
-            <select
-              value={selectedClassification}
-              onChange={(e) => setSelectedClassification(e.target.value)}
-              className="rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-1.5 text-xs text-white focus:outline-none"
-            >
-              <option value="ALL">All Clearances</option>
-              <option value="1">Tier-1 Minimum</option>
-              <option value="2">Tier-2 Minimum</option>
-              <option value="3">Tier-3 Minimum</option>
-            </select>
+          {/* Patients Table */}
+          <div className="overflow-x-auto rounded-2xl border border-slate-800">
+            <table className="w-full text-left text-xs text-slate-300">
+              <thead className="bg-slate-950/80 text-[11px] uppercase tracking-wider text-slate-400 border-b border-slate-800">
+                <tr>
+                  <th className="px-4 py-3 font-semibold">Patient Name & MRN</th>
+                  <th className="px-4 py-3 font-semibold">Department</th>
+                  <th className="px-4 py-3 font-semibold">DOB & Gender</th>
+                  <th className="px-4 py-3 font-semibold">Blood Group</th>
+                  <th className="px-4 py-3 font-semibold">Contact Email</th>
+                  <th className="px-4 py-3 font-semibold text-right">Tenancy Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/60 bg-slate-900/40">
+                {deptPatients.map((pat) => (
+                  <tr key={pat.id} className="hover:bg-slate-800/40 transition">
+                    <td className="px-4 py-3">
+                      <div className="font-bold text-white text-xs">{pat.fullName}</div>
+                      <div className="font-mono text-[10px] text-quantum-400">{pat.mrn || pat.id}</div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="rounded bg-quantum-950 px-2 py-0.5 text-[10px] font-mono font-semibold text-quantum-300 border border-quantum-800/60">
+                        {pat.assignedDepartment}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span>{pat.dateOfBirth}</span>
+                      <span className="text-slate-500 mx-1">•</span>
+                      <span>{pat.gender}</span>
+                    </td>
+                    <td className="px-4 py-3 font-mono">{pat.bloodGroup || 'N/A'}</td>
+                    <td className="px-4 py-3 font-mono text-[11px] text-slate-400">
+                      {pat.contactEmail || 'N/A'}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <span className="inline-flex items-center space-x-1 text-emerald-400 font-semibold text-[11px]">
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                        <span>In-Dept Cohort</span>
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
 
-        {/* Records Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {filteredRecords.map((record) => {
-            // Quick preview simulation of pass/fail for badge
-            return (
+        {/* Section 2: Scoped Electronic Health Records & Decryption */}
+        <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-bold text-white tracking-tight flex items-center space-x-2">
+                <FileText className="h-5 w-5 text-quantum-400" />
+                <span>Department Electronic Health Records ({currentUser.department})</span>
+              </h2>
+              <p className="text-xs text-slate-400">
+                Ciphertexts enveloped with FIPS 203 ML-KEM-768 and AES-256-GCM.
+              </p>
+            </div>
+
+            <div className="flex items-center space-x-3">
+              {/* Search */}
+              <div className="relative">
+                <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-500" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search in department..."
+                  className="rounded-xl border border-slate-800 bg-slate-950 pl-9 pr-3.5 py-1.5 text-xs text-white placeholder-slate-500 focus:border-quantum-500 focus:outline-none"
+                />
+              </div>
+
+              {/* Create Record Button */}
+              <Link
+                href="/records/new"
+                className="flex items-center space-x-1.5 rounded-xl bg-quantum-600 px-3.5 py-1.5 text-xs font-bold text-white hover:bg-quantum-500 transition shadow-md shadow-quantum-900/30"
+              >
+                <PlusCircle className="h-4 w-4" />
+                <span>New EHR</span>
+              </Link>
+            </div>
+          </div>
+
+          {/* Record Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {filteredRecords.map((rec) => (
               <div
-                key={record.id}
-                className="group flex flex-col justify-between rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-lg backdrop-blur-md transition hover:border-slate-700 hover:bg-slate-850"
+                key={rec.id}
+                className="rounded-2xl border border-slate-800 bg-slate-900/90 p-5 shadow-lg backdrop-blur-md flex flex-col justify-between space-y-4 hover:border-slate-700 transition"
               >
                 <div>
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-center space-x-2.5">
-                      <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-slate-800 text-quantum-400 border border-slate-700">
-                        <Lock className="h-4 w-4" />
-                      </div>
-                      <div>
-                        <span className="rounded bg-slate-800 px-2 py-0.5 text-[10px] font-mono font-bold text-slate-300">
-                          {record.patientId}
-                        </span>
-                        <span className="ml-2 text-[11px] text-slate-400 font-medium">
-                          {record.department}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center space-x-1.5">
-                      <span
-                        className={`rounded px-2 py-0.5 text-[10px] font-mono font-bold uppercase ${
-                          record.classificationLevel === 3
-                            ? 'bg-purple-950 text-purple-300 border border-purple-800'
-                            : record.classificationLevel === 2
-                            ? 'bg-blue-950 text-blue-300 border border-blue-800'
-                            : 'bg-slate-800 text-slate-300 border border-slate-700'
-                        }`}
-                      >
-                        Tier-{record.classificationLevel} Req
-                      </span>
-                    </div>
+                  <div className="flex items-start justify-between gap-2 mb-2">
+                    <span className="rounded bg-quantum-950 px-2 py-0.5 text-[10px] font-mono font-bold text-quantum-400 border border-quantum-800/60">
+                      [{rec.department}]
+                    </span>
+                    <span className="rounded bg-slate-800 px-2 py-0.5 text-[10px] font-mono text-slate-300">
+                      Tier-{rec.classificationLevel}
+                    </span>
                   </div>
 
-                  <h3 className="mt-3 text-sm font-bold text-white group-hover:text-quantum-300 transition">
-                    {record.recordTitle}
+                  <h3 className="text-sm font-bold text-white leading-snug mb-1">
+                    {rec.recordTitle}
                   </h3>
 
-                  {/* ABAC Policy Summary */}
-                  <div className="mt-3 rounded-xl bg-slate-950/70 p-3 border border-slate-800/80 space-y-1.5 text-xs">
-                    <div className="flex items-center justify-between">
-                      <span className="font-semibold text-slate-300">
-                        {record.abacPolicy.name}
-                      </span>
-                      <span className="text-[10px] font-mono text-quantum-400 font-bold">
-                        {record.abacPolicy.combinator} LOGIC
-                      </span>
+                  <div className="text-[11px] text-slate-400 space-y-0.5">
+                    <div>
+                      <span>Patient ID: </span>
+                      <span className="font-mono text-slate-200">{rec.patientId}</span>
                     </div>
-                    <p className="text-[11px] text-slate-400 leading-tight">
-                      {record.abacPolicy.description}
-                    </p>
-                  </div>
-
-                  {/* Ciphertext Telemetry */}
-                  <div className="mt-3 flex items-center justify-between text-[11px] font-mono text-slate-500">
-                    <span>Enveloped DEK: 1088 Bytes (ML-KEM)</span>
-                    <span>IV: 12B • Tag: 16B</span>
+                    <div>
+                      <span>Created By: </span>
+                      <span className="text-slate-300">{rec.createdByName || 'Attending Physician'}</span>
+                    </div>
                   </div>
                 </div>
 
-                <div className="mt-5 pt-3 border-t border-slate-800/80 flex items-center justify-between">
-                  <div className="text-[11px] text-slate-400">
-                    Created by: <span className="text-slate-300">{record.createdByName}</span>
+                {/* Cryptographic Badges & Decrypt Action */}
+                <div className="pt-3 border-t border-slate-800 flex items-center justify-between">
+                  <div className="flex items-center space-x-2 text-[10px] font-mono text-slate-500">
+                    <span className="rounded bg-slate-950 px-1.5 py-0.5 border border-slate-800">
+                      ML-KEM-768
+                    </span>
+                    <span className="rounded bg-slate-950 px-1.5 py-0.5 border border-slate-800">
+                      AES-256-GCM
+                    </span>
                   </div>
 
                   <button
-                    onClick={() => handleInspectRecord(record)}
-                    className="flex items-center space-x-1.5 rounded-lg bg-quantum-600 px-3.5 py-1.5 text-xs font-bold text-white shadow hover:bg-quantum-500 transition"
+                    type="button"
+                    onClick={() => handleDecryptRecord(rec)}
+                    className="flex items-center space-x-1.5 rounded-xl bg-gradient-to-r from-quantum-600 to-cyan-500 px-3.5 py-2 text-xs font-bold text-white shadow-md shadow-quantum-900/30 hover:from-quantum-500 hover:to-cyan-400 transition"
                   >
                     <Unlock className="h-3.5 w-3.5" />
-                    <span>Evaluate & Decrypt</span>
+                    <span>Open & Decrypt EHR</span>
                   </button>
                 </div>
               </div>
-            );
-          })}
-        </div>
+            ))}
 
-        {filteredRecords.length === 0 && (
-          <div className="text-center py-16 rounded-2xl border border-slate-800 bg-slate-900/40 p-8 space-y-3">
-            <FileText className="h-10 w-10 text-slate-600 mx-auto" />
-            <h3 className="text-sm font-bold text-white">No EHR records matched your filter</h3>
-            <p className="text-xs text-slate-400">
-              Try adjusting your search query, department filter, or click &quot;Encrypt New EHR&quot; to add a new record.
-            </p>
+            {filteredRecords.length === 0 && (
+              <div className="col-span-full rounded-2xl border border-dashed border-slate-800 p-8 text-center text-xs text-slate-500">
+                No electronic health records found in {currentUser.department} matching your search.
+              </div>
+            )}
           </div>
-        )}
+        </div>
       </main>
 
-      {/* Decryption Inspector Modal */}
-      {modalOpen && (
-        <DecryptionModal
-          record={selectedRecord}
-          decryptionResult={decryptionResult}
-          isDecrypting={isDecrypting}
-          onClose={() => setModalOpen(false)}
-          onRetry={() => selectedRecord && handleInspectRecord(selectedRecord)}
-        />
-      )}
+      {/* Decryption Viewer Modal */}
+      <DecryptionModal
+        record={selectedRecord}
+        decryptionResult={decryptionResult}
+        isDecrypting={isDecrypting}
+        onClose={() => setSelectedRecord(null)}
+        onRetry={() => selectedRecord && handleDecryptRecord(selectedRecord)}
+      />
     </div>
   );
 }

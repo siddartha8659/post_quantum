@@ -55,6 +55,27 @@ export default function NewRecordPage() {
   const [encryptionStep, setEncryptionStep] = useState<string>('');
   const [successRecordId, setSuccessRecordId] = useState<string | null>(null);
 
+  // Automatically lock record to creator's current department
+  React.useEffect(() => {
+    if (currentUser?.department) {
+      setDepartment(currentUser.department as Department);
+      setConditions([
+        {
+          field: 'department',
+          operator: '==',
+          value: currentUser.department,
+          description: `Requires ${currentUser.department} Department affiliation`,
+        },
+        {
+          field: 'clearanceLevel',
+          operator: '>=',
+          value: 2,
+          description: 'Requires Minimum Tier-2 Clearance',
+        },
+      ]);
+    }
+  }, [currentUser]);
+
   // Policy Presets
   const handlePresetSelect = (preset: string) => {
     setPolicyPreset(preset);
@@ -342,17 +363,17 @@ export default function NewRecordPage() {
                 </div>
 
                 <div>
-                  <label className="block font-semibold text-slate-300 mb-1">Department Scope</label>
-                  <select
-                    value={department}
-                    onChange={(e) => setDepartment(e.target.value as Department)}
-                    className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-white focus:outline-none"
-                  >
-                    <option value="Oncology">Oncology</option>
-                    <option value="Emergency">Emergency</option>
-                    <option value="Cardiology">Cardiology</option>
-                    <option value="Research">Research</option>
-                  </select>
+                  <label className="block font-semibold text-slate-300 mb-1 flex items-center justify-between">
+                    <span>Department Scope</span>
+                    <span className="text-[10px] text-quantum-400 font-mono">🔒 Locked to Creator</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={`${department} (Strict Departmental Isolation)`}
+                    readOnly
+                    disabled
+                    className="w-full rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-quantum-300 font-bold focus:outline-none cursor-not-allowed"
+                  />
                 </div>
 
                 <div>
